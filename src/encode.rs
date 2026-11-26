@@ -4,6 +4,9 @@
 //! - `meeting`: AAC in an `.m4a` file, mono, 48 kHz, 64 kbps. Samples are
 //!   downmixed to mono into a temporary CAF, then converted with macOS's
 //!   built-in `afconvert` tool.
+//!
+//! The file is written under a `.part` name and renamed when complete, so a
+//! file with the final name is always a finished one.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -40,6 +43,28 @@ enum Inner {
     },
 }
 
+/// Work-in-progress files that may exist next to `final_path` while it is
+/// being written: the `.part` file renamed into place on success and the
+/// temporary CAF used for AAC conversion.
+pub fn partial_paths_for(final_path: &Path) -> [PathBuf; 2] {
+    [part_path_for(final_path), temp_path_for(final_path)]
+}
+
+/// File the final output is written to before being renamed into place,
+/// e.g. `song.wav.part`.
+fn part_path_for(final_path: &Path) -> PathBuf {
+    let name = final_path.file_name().unwrap_or_default().to_string_lossy();
+    final_path.with_file_name(format!("{name}.part"))
+}
+
+/// Moves a completed `.part` file to its final name; removes it on failure.
+fn publish(part: &Path, final_path: &Path) -> Result<()> {
+    std::fs::rename(part, final_path).map_err(|error| {
+        let _ = std::fs::remove_file(part);
+        anyhow::Error::from(error).context(format!("cannot create {}", final_path.display()))
+    })
+}
+
 /// Temporary file used before AAC conversion, e.g. `call.m4a.tmp.caf`.
 fn temp_path_for(final_path: &Path) -> PathBuf {
     let name = final_path.file_name().unwrap_or_default().to_string_lossy();
@@ -56,9 +81,10 @@ impl FinalWriter {
                     bits_per_sample: 24,
                     sample_format: hound::SampleFormat::Int,
                 };
+                let part = part_path_for(final_path);
                 Inner::Music {
-                    writer: hound::WavWriter::create(final_path, spec)
-                        .with_context(|| format!("cannot create {}", final_path.display()))?,
+                    writer: hound::WavWriter::create(&part, spec)
+                        .with_context(|| format!("cannot create {}", part.display()))?,
                     path: final_path.to_path_buf(),
                 }
             }
@@ -111,6 +137,7 @@ impl FinalWriter {
         match self.inner {
             Inner::Music { writer, path } => {
                 writer.finalize()?;
+                publish(&part_path_for(&path), &path)?;
                 Ok(path)
             }
             Inner::Meeting {
@@ -119,10 +146,12 @@ impl FinalWriter {
                 final_path,
                 ..
             } => {
+                let part = part_path_for(&final_path);
                 let result = temp
                     .finalize()
                     .map_err(anyhow::Error::from)
-                    .and_then(|()| convert_to_aac(&temp_path, &final_path));
+                    .and_then(|()| convert_to_aac(&temp_path, &part))
+                    .and_then(|()| publish(&part, &final_path));
                 let _ = std::fs::remove_file(&temp_path);
                 result.map(|()| final_path)
             }
@@ -184,6 +213,26 @@ mod tests {
         assert_eq!(spec.channels, 2);
         assert_eq!(spec.sample_rate, 48_000);
         assert_eq!(reader.len(), 2_000);
+    }
+
+    #[test]
+    fn final_name_appears_only_when_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        for (mode, name) in [(Mode::Music, "a.wav"), (Mode::Meeting, "a.m4a")] {
+            let path = dir.path().join(name);
+            let format = StreamFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            };
+            let mut writer = FinalWriter::create(mode, &path, format).unwrap();
+            writer.write(&tone(4_800, 2, 0.5)).unwrap();
+            assert!(!path.exists(), "{name} must not exist before finish");
+            writer.finish().unwrap();
+            assert!(path.is_file());
+            for partial in partial_paths_for(&path) {
+                assert!(!partial.exists(), "{} left behind", partial.display());
+            }
+        }
     }
 
     #[test]

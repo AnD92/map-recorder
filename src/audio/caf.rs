@@ -70,6 +70,12 @@ impl CafWriter {
         self.bytes_written
     }
 
+    /// Pushes buffered samples to disk. The data size stays "unknown", which
+    /// readers resolve from the file length.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+
     /// Flushes the samples and records the real data chunk size.
     pub fn finalize(mut self) -> io::Result<()> {
         self.out.flush()?;

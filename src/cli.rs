@@ -173,6 +173,12 @@ fn report_recording(report: &RecordReport, settings: &Settings) -> ExitCode {
         StopReason::Error => println!("Warning: recording stopped because of a write error."),
         StopReason::User => {}
     }
+    if report.unreadable_cycles > 0 {
+        println!(
+            "Warning: {} audio buffers had an unexpected layout and were skipped; parts of the recording may be missing. Please report this with your audio device model.",
+            report.unreadable_cycles
+        );
+    }
     if report.overruns > 0 {
         println!(
             "Warning: {} audio buffers were dropped because the disk could not keep up.",

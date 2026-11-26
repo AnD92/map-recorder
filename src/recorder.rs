@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use crate::audio::io::RawWriter;
 use crate::capture::{StreamFormat, SystemAudioTap};
 use crate::cli::ensure_absent;
+use crate::encode::partial_paths_for;
 use crate::mode::{Mode, Settings, raw_path_for};
 use crate::process::{TrimOutcome, trim_file};
 
@@ -29,6 +30,8 @@ pub const RING_SECONDS: u32 = 10;
 /// Ring capacity: `RING_SECONDS` of 96 kHz stereo (≈ 7.7 MB). Typical
 /// streams (48 kHz stereo) get twice that margin.
 const RING_CAPACITY_SAMPLES: usize = RING_SECONDS as usize * 96_000 * 2;
+/// How often the raw file's header is brought up to date while recording.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the status line is redrawn.
 const REFRESH: Duration = Duration::from_millis(100);
 /// Width of the level meter bar, in characters.
@@ -61,6 +64,8 @@ pub struct RecordReport {
     pub duration_secs: f64,
     /// Number of audio callbacks dropped because the writer fell behind.
     pub overruns: u64,
+    /// Audio cycles skipped because their buffer layout was not understood.
+    pub unreadable_cycles: u64,
     pub stop_reason: StopReason,
     pub outcome: TrimOutcome,
 }
@@ -87,12 +92,31 @@ pub fn size_limit_reached(mode: Mode, bytes_written: u64) -> bool {
     mode == Mode::Music && bytes_written >= WAV_SAFE_LIMIT_BYTES
 }
 
+/// What a Ctrl+C received after the stop was already requested should do.
+#[derive(Debug, PartialEq, Eq)]
+enum SignalAction {
+    /// The raw file is still being closed: exiting now could corrupt it.
+    WaitForRawFile,
+    /// The raw file is complete: exit immediately and point at it.
+    ExitKeepingRaw,
+}
+
+fn repeated_signal_action(raw_finalized: bool) -> SignalAction {
+    if raw_finalized {
+        SignalAction::ExitKeepingRaw
+    } else {
+        SignalAction::WaitForRawFile
+    }
+}
+
 /// State shared between the main thread, the writer thread and the signal
 /// and stdin handlers.
 struct Shared {
     stop: AtomicBool,
     stop_reason: AtomicU8,
     capture_done: AtomicBool,
+    /// Set once the raw file has been finalised and is safe to keep as is.
+    raw_finalized: AtomicBool,
 }
 
 impl Shared {
@@ -121,8 +145,9 @@ pub fn record(opts: &RecordOptions) -> Result<RecordReport> {
         stop: AtomicBool::new(false),
         stop_reason: AtomicU8::new(StopReason::User as u8),
         capture_done: AtomicBool::new(false),
+        raw_finalized: AtomicBool::new(false),
     });
-    install_stop_handlers(&shared, &raw_path)?;
+    install_stop_handlers(&shared, &raw_path, &opts.output)?;
 
     // The ring buffer must exist before capture starts, when the stream
     // format is not yet known, so it is sized for a demanding format.
@@ -180,12 +205,14 @@ pub fn record(opts: &RecordOptions) -> Result<RecordReport> {
     println!();
 
     // Stop capturing, let the writer drain what is left, close the raw file.
+    let unreadable_cycles = tap.unreadable_cycles();
     drop(tap);
     shared.capture_done.store(true, Ordering::SeqCst);
     let frames = writer
         .join()
         .map_err(|_| anyhow::anyhow!("raw writer thread panicked"))?
         .with_context(|| format!("failed while writing {}", raw_path.display()))?;
+    shared.raw_finalized.store(true, Ordering::SeqCst);
     let duration_secs = frames as f64 / format.sample_rate as f64;
 
     // Trim; on failure the raw file stays on disk and its path is reported.
@@ -208,6 +235,7 @@ pub fn record(opts: &RecordOptions) -> Result<RecordReport> {
         raw_kept,
         duration_secs,
         overruns: overruns.load(Ordering::Relaxed),
+        unreadable_cycles,
         stop_reason: shared.reason(),
         outcome,
     })
@@ -220,21 +248,35 @@ fn mode_name(mode: Mode) -> &'static str {
     }
 }
 
-/// Enter (any line on stdin) or Ctrl+C stops the recording. A second Ctrl+C,
-/// e.g. while trimming, exits immediately and points at the raw file.
-fn install_stop_handlers(shared: &Arc<Shared>, raw_path: &Path) -> Result<()> {
+/// Enter (any line on stdin), Ctrl+C, closing the terminal or SIGTERM stop
+/// the recording gracefully. A repeated signal, e.g. while trimming, exits
+/// immediately once the raw file is complete, removing any half-written
+/// final file and pointing at the raw one.
+fn install_stop_handlers(shared: &Arc<Shared>, raw_path: &Path, output: &Path) -> Result<()> {
     let on_signal = {
         let shared = Arc::clone(shared);
         let raw_path = raw_path.to_path_buf();
+        let output = output.to_path_buf();
         move || {
-            if shared.stop.load(Ordering::SeqCst) {
-                eprintln!(
-                    "\nInterrupted. The untrimmed recording is at {}",
-                    raw_path.display()
-                );
-                std::process::exit(130);
+            if !shared.stop.load(Ordering::SeqCst) {
+                shared.request_stop(StopReason::User);
+                return;
             }
-            shared.request_stop(StopReason::User);
+            match repeated_signal_action(shared.raw_finalized.load(Ordering::SeqCst)) {
+                SignalAction::WaitForRawFile => {
+                    eprintln!("\nFinishing the raw recording file, please wait…");
+                }
+                SignalAction::ExitKeepingRaw => {
+                    for partial in partial_paths_for(&output) {
+                        let _ = std::fs::remove_file(partial);
+                    }
+                    eprintln!(
+                        "\nInterrupted. The untrimmed recording is at {}",
+                        raw_path.display()
+                    );
+                    std::process::exit(130);
+                }
+            }
         }
     };
     ctrlc::set_handler(on_signal).context("cannot install the Ctrl+C handler")?;
@@ -262,6 +304,7 @@ fn write_raw(
     let result = (|| {
         let mut writer = RawWriter::create(path, format)?;
         let mut samples = 0u64;
+        let mut last_flush = Instant::now();
         loop {
             // Read whatever is available; an empty buffer after capture has
             // ended means everything has been written.
@@ -282,6 +325,12 @@ fn write_raw(
             writer.write(second)?;
             chunk.commit_all();
             samples += available as u64;
+
+            // Keep the file valid on disk in case the process is killed.
+            if last_flush.elapsed() >= FLUSH_INTERVAL {
+                writer.flush()?;
+                last_flush = Instant::now();
+            }
 
             if size_limit_reached(mode, writer.bytes_written()) {
                 shared.request_stop(StopReason::SizeLimit);
@@ -314,6 +363,12 @@ mod tests {
         let line = format_status(Duration::ZERO, f32::NEG_INFINITY);
         assert!(line.contains("00:00:00"), "{line}");
         assert!(line.contains("silence"), "{line}");
+    }
+
+    #[test]
+    fn repeated_ctrl_c_waits_until_raw_file_is_complete() {
+        assert_eq!(repeated_signal_action(false), SignalAction::WaitForRawFile);
+        assert_eq!(repeated_signal_action(true), SignalAction::ExitKeepingRaw);
     }
 
     #[test]

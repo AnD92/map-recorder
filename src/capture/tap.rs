@@ -17,6 +17,8 @@ use std::cell::RefCell;
 use std::ffi::CStr;
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::RcBlock;
 use objc2::AnyThread;
@@ -69,6 +71,8 @@ pub(super) struct TapSession {
     format: StreamFormat,
     /// Kept alive for as long as Core Audio may invoke it.
     _io_block: Option<IoBlock>,
+    /// IO cycles skipped because their buffer layout was not understood.
+    unreadable_cycles: Arc<AtomicU64>,
 }
 
 // SAFETY: the session only holds plain Core Audio object IDs and a block
@@ -228,11 +232,18 @@ fn aggregate_description(
 
 /// Builds the IO block that runs on Core Audio's real-time thread.
 ///
+/// IO cycles whose buffer layout cannot be understood increment
+/// `unreadable` and are skipped.
+///
 /// The block reads the tap's input buffers, interleaves them into a
 /// pre-allocated scratch buffer when Core Audio delivers one buffer per
 /// channel, and forwards the samples to the user's callback. It never
 /// allocates.
-fn make_io_block(mut on_samples: SampleCallback, channels: usize) -> IoBlock {
+fn make_io_block(
+    mut on_samples: SampleCallback,
+    channels: usize,
+    unreadable: Arc<AtomicU64>,
+) -> IoBlock {
     let scratch = RefCell::new(vec![0.0f32; SCRATCH_FRAMES * channels]);
     let callback = RefCell::new(move |samples: &[f32]| on_samples(samples));
 
@@ -258,23 +269,36 @@ fn make_io_block(mut on_samples: SampleCallback, channels: usize) -> IoBlock {
             let buffers =
                 unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), buffer_count) };
 
-            // Interleaved layout: a single buffer already holds every channel.
-            if buffer_count == 1 && buffers[0].mNumberChannels as usize == channels {
-                let buffer = &buffers[0];
-                if buffer.mData.is_null() {
+            // Find the tap's buffers; anything unexpected is counted so the
+            // problem can be reported instead of failing silently.
+            let layout = locate_tap_buffers(buffer_count, |i| buffers[i].mNumberChannels, channels);
+            let first = match layout {
+                Some(TapLayout::Interleaved(index)) => {
+                    // A single buffer already holds every channel.
+                    let buffer = &buffers[index];
+                    if buffer.mData.is_null() {
+                        unreadable.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                    let len = buffer.mDataByteSize as usize / size_of::<f32>();
+                    // SAFETY: the buffer holds `mDataByteSize` bytes of f32 samples.
+                    let samples =
+                        unsafe { std::slice::from_raw_parts(buffer.mData as *const f32, len) };
+                    callback(samples);
                     return;
                 }
-                let len = buffer.mDataByteSize as usize / size_of::<f32>();
-                // SAFETY: the buffer holds `mDataByteSize` bytes of f32 samples.
-                let samples =
-                    unsafe { std::slice::from_raw_parts(buffer.mData as *const f32, len) };
-                callback(samples);
-                return;
-            }
+                Some(TapLayout::NonInterleaved(first)) => first,
+                None => {
+                    unreadable.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            };
 
-            // Non-interleaved layout: one mono buffer per channel. Interleave
-            // them slice by slice into the scratch buffer.
-            if buffer_count != channels || buffers.iter().any(|b| b.mData.is_null()) {
+            // One mono buffer per channel: interleave them slice by slice
+            // into the scratch buffer.
+            let buffers = &buffers[first..first + channels];
+            if buffers.iter().any(|b| b.mData.is_null()) {
+                unreadable.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             let frames = buffers
@@ -302,6 +326,36 @@ fn make_io_block(mut on_samples: SampleCallback, channels: usize) -> IoBlock {
     )
 }
 
+/// Where the tap's audio sits in the aggregate device's input buffer list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TapLayout {
+    /// One buffer, at this index, holding all channels interleaved.
+    Interleaved(usize),
+    /// `channels` mono buffers starting at this index.
+    NonInterleaved(usize),
+}
+
+/// Finds the tap's buffers among `count` input buffers whose channel counts
+/// are given by `channels_of`.
+fn locate_tap_buffers(
+    count: usize,
+    channels_of: impl Fn(usize) -> u32,
+    channels: usize,
+) -> Option<TapLayout> {
+    // Sub-taps follow the sub-devices' own input streams (e.g. the inputs of
+    // an audio interface used as output), so the tap is at the end of the list.
+    if count == 0 || channels == 0 {
+        return None;
+    }
+    if channels_of(count - 1) as usize == channels {
+        return Some(TapLayout::Interleaved(count - 1));
+    }
+    if channels > 1 && count >= channels && (count - channels..count).all(|i| channels_of(i) == 1) {
+        return Some(TapLayout::NonInterleaved(count - channels));
+    }
+    None
+}
+
 impl TapSession {
     /// Creates the tap and the aggregate device and starts streaming audio
     /// to `on_samples`. On failure everything created so far is released.
@@ -321,6 +375,7 @@ impl TapSession {
                 channels: 0,
             },
             _io_block: None,
+            unreadable_cycles: Arc::new(AtomicU64::new(0)),
         };
 
         // Step 1: describe a private, unmuted stereo tap of every process.
@@ -376,7 +431,11 @@ impl TapSession {
         check("AudioHardwareCreateAggregateDevice", status)?;
 
         // Step 5: install the real-time IO block and start the device.
-        let block = make_io_block(on_samples, session.format.channels as usize);
+        let block = make_io_block(
+            on_samples,
+            session.format.channels as usize,
+            Arc::clone(&session.unreadable_cycles),
+        );
         // SAFETY: the block is kept alive in `session` until the IO proc is
         // destroyed; a `None` queue makes Core Audio call it on its IO thread.
         let status = unsafe {
@@ -401,6 +460,10 @@ impl TapSession {
     pub(super) fn format(&self) -> StreamFormat {
         self.format
     }
+
+    pub(super) fn unreadable_cycles(&self) -> u64 {
+        self.unreadable_cycles.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for TapSession {
@@ -424,5 +487,40 @@ impl Drop for TapSession {
                 AudioHardwareDestroyProcessTap(self.tap_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locate(buffers: &[u32]) -> Option<TapLayout> {
+        locate_tap_buffers(buffers.len(), |i| buffers[i], 2)
+    }
+
+    #[test]
+    fn single_interleaved_buffer() {
+        assert_eq!(locate(&[2]), Some(TapLayout::Interleaved(0)));
+    }
+
+    #[test]
+    fn one_mono_buffer_per_channel() {
+        assert_eq!(locate(&[1, 1]), Some(TapLayout::NonInterleaved(0)));
+    }
+
+    #[test]
+    fn tap_follows_input_streams_of_the_output_device() {
+        // e.g. an audio interface with a stereo input, then the stereo tap.
+        assert_eq!(locate(&[2, 2]), Some(TapLayout::Interleaved(1)));
+        assert_eq!(locate(&[1, 1, 1, 1]), Some(TapLayout::NonInterleaved(2)));
+        assert_eq!(locate(&[8, 2]), Some(TapLayout::Interleaved(1)));
+    }
+
+    #[test]
+    fn unknown_layouts_are_rejected() {
+        assert_eq!(locate(&[]), None);
+        assert_eq!(locate(&[1]), None);
+        assert_eq!(locate(&[4]), None);
+        assert_eq!(locate(&[2, 1]), None);
     }
 }

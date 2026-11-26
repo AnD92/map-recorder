@@ -81,6 +81,17 @@ impl RawWriter {
         }
     }
 
+    /// Pushes buffered samples to disk and updates the container's size
+    /// fields, so the file is complete up to this point even if the process
+    /// is killed before `finalize`.
+    pub fn flush(&mut self) -> Result<()> {
+        match self {
+            RawWriter::Wav(writer) => writer.flush()?,
+            RawWriter::Caf(writer) => writer.flush()?,
+        }
+        Ok(())
+    }
+
     /// Flushes everything and fixes up the container's size fields.
     pub fn finalize(self) -> Result<()> {
         match self {
@@ -221,6 +232,21 @@ mod tests {
         assert_eq!(reader.format(), STEREO);
         assert_eq!(reader.total_frames(), 5_000);
         assert_eq!(read_all(&mut reader), samples);
+    }
+
+    #[test]
+    fn flushed_wav_is_readable_while_still_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.raw.wav");
+        let samples = signal(2_000, 2);
+        let mut writer = RawWriter::create(&path, STEREO).unwrap();
+        writer.write(&samples).unwrap();
+        writer.flush().unwrap();
+        // The writer is still open (e.g. the process is about to be killed).
+        let mut reader = RawReader::open(&path).unwrap();
+        assert_eq!(reader.total_frames(), 2_000);
+        assert_eq!(read_all(&mut reader), samples);
+        drop(writer);
     }
 
     #[test]

@@ -64,11 +64,17 @@ map-recorder uses a *global* tap, i.e. all processes.
 6. **Install the IO block.** `AudioDeviceCreateIOProcIDWithBlock` registers a
    closure that Core Audio calls on its **real-time thread** (we pass no
    dispatch queue). Each call receives an `AudioBufferList` with the tapped
-   audio. Two layouts are handled:
+   audio. If the output device also has inputs (e.g. an audio interface),
+   their buffers come first and the tap's buffers are **at the end** of the
+   list, so the block always reads the trailing buffers. Two layouts are
+   handled:
    - **interleaved** — one buffer holding all channels (`L R L R …`): passed
      through as-is, no copy. This is what we observe on macOS 26;
    - **non-interleaved** — one buffer per channel: interleaved into a scratch
      buffer that was allocated *before* starting, in slices if needed.
+
+   Any other layout is skipped and counted (`SystemAudioTap::unreadable_cycles`);
+   the CLI warns at the end of the recording if the count is non-zero.
 
 7. **Start.** `AudioDeviceStart(aggregate, io_proc)`.
 

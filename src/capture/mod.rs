@@ -57,4 +57,11 @@ impl SystemAudioTap {
     pub fn format(&self) -> StreamFormat {
         self.inner.format()
     }
+
+    /// Number of audio cycles skipped so far because Core Audio delivered a
+    /// buffer layout this program does not understand. Non-zero means audio
+    /// is missing from the recording.
+    pub fn unreadable_cycles(&self) -> u64 {
+        self.inner.unreadable_cycles()
+    }
 }

@@ -30,7 +30,7 @@ Saved /Users/you/Music/map-recorder/recording-20261126-160905.wav
   - `music` — strict silence detection (quiet passages and fade-outs are preserved), lossless **24-bit WAV**;
   - `meeting` — lenient silence detection (room noise counts as silence), compact **AAC `.m4a`**, mono, ready for transcription tools.
 - 📈 Live elapsed time and level meter while recording.
-- 🛟 **Safe by design**: audio is streamed to disk while recording, so even a crash leaves a usable file; the untrimmed capture is kept whenever something goes wrong.
+- 🛟 **Safe by design**: audio is streamed to disk and the file is kept valid every second, so even a crash or a closed terminal leaves a usable file; the untrimmed capture is kept whenever something goes wrong, and a file with the final name is always complete.
 - 🔁 `trim` command to re-process any `.wav` / `.caf` file with different settings.
 
 ## Requirements
@@ -80,6 +80,7 @@ map-recorder record
 ```
 
 Start playback whenever you like, then press **Enter** (or **Ctrl+C**) to stop.
+Pressing **Ctrl+C** again while trimming exits immediately and keeps the untrimmed capture.
 The result is saved to `~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.wav`.
 
 ### Record a meeting
@@ -177,6 +178,11 @@ IDE-embedded or sandboxed shells). Run it from a regular terminal window.
 **"audio buffers were dropped".**
 The disk could not keep up with the incoming audio (very rare). Save to a
 local, fast disk.
+
+**"audio buffers had an unexpected layout".**
+Core Audio delivered the audio in a way map-recorder doesn't recognise (this
+may happen with some multi-channel audio interfaces). Please open an issue with
+your audio device model.
 
 **"Output file … already exists".**
 `map-recorder` never overwrites files. Pick another name with `-o`.
