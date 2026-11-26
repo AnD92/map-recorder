@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.map-recorder</string>
+	<key>CFBundleName</key>
+	<string>map-recorder</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>map-recorder records the audio your Mac plays so it can save it to a file.</string>
+</dict>
+</plist>

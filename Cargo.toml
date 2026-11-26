@@ -1,0 +1,16 @@
+[package]
+name = "map-recorder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.105"
+block2 = "0.6.2"
+hound = "3.5.1"
+objc2 = "0.6.5"
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+rtrb = "0.4.1"
+thiserror = "2.0.21"
