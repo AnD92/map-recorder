@@ -49,13 +49,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Then install `map-recorder` directly from GitHub:
 
 ```sh
-cargo install --git https://github.com/<OWNER>/map-recorder
+cargo install --git https://github.com/AnD92/map-recorder
 ```
 
 or build it from a clone:
 
 ```sh
-git clone https://github.com/<OWNER>/map-recorder
+git clone https://github.com/AnD92/map-recorder
 cd map-recorder
 cargo build --release
 ./target/release/map-recorder --help
