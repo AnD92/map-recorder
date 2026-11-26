@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueHint};
 
+use crate::convert::{convert_file, default_converted_path};
 use crate::mode::{Format, Mode, Settings, resolve_format};
 use crate::process::{TrimOutcome, trim_file};
 use crate::recorder::{RecordOptions, RecordReport, StopReason, record};
@@ -33,6 +34,21 @@ pub enum Command {
     Record(RecordArgs),
     /// Trim the silence of an existing .wav or .caf file.
     Trim(TrimArgs),
+    /// Convert existing audio files to compact .m4a (no trimming).
+    Convert(ConvertArgs),
+}
+
+#[derive(Args)]
+pub struct ConvertArgs {
+    /// Audio files to convert (anything macOS can read: wav, aiff, caf, flac, mp3…).
+    #[arg(required = true, value_hint = ValueHint::FilePath)]
+    pub files: Vec<PathBuf>,
+    /// Where to write the result (single input only) [default: <input>.m4a].
+    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    pub output: Option<PathBuf>,
+    /// Quality preset: music (stereo, 256 kbps) or meeting (mono, 64 kbps).
+    #[arg(long, value_enum, default_value = "music")]
+    pub mode: Mode,
 }
 
 /// Options shared by every command that trims audio.
@@ -209,9 +225,37 @@ fn report_recording(report: &RecordReport, settings: &Settings) -> ExitCode {
     code
 }
 
+/// Converts every input, reporting each result; one failure does not stop
+/// the others. Fails overall if any file could not be converted.
+fn run_convert(args: ConvertArgs) -> Result<ExitCode> {
+    if args.output.is_some() && args.files.len() > 1 {
+        bail!("-o can only be used with a single input file");
+    }
+    let mut failed = false;
+    for input in &args.files {
+        let output = args
+            .output
+            .clone()
+            .unwrap_or_else(|| default_converted_path(input));
+        match convert_file(input, &output, args.mode) {
+            Ok(()) => println!("Saved {}", output.display()),
+            Err(error) => {
+                eprintln!("error: {}: {error:#}", input.display());
+                failed = true;
+            }
+        }
+    }
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
 /// Runs the parsed command and returns the process exit code.
 pub fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::Convert(args) => run_convert(args),
         Command::Trim(args) => {
             let mode = args.tuning.mode;
             let settings = args.tuning.settings();
