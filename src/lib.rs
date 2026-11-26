@@ -2,5 +2,6 @@
 
 pub mod audio;
 pub mod capture;
+pub mod encode;
 pub mod mode;
 pub mod trim;
