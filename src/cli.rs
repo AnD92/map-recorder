@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-use crate::mode::{Mode, Settings};
+use crate::mode::{Format, Mode, Settings, resolve_format};
 use crate::process::{TrimOutcome, trim_file};
 use crate::recorder::{RecordOptions, RecordReport, StopReason, record};
 
@@ -38,9 +38,12 @@ pub enum Command {
 /// Options shared by every command that trims audio.
 #[derive(Args)]
 pub struct TuningArgs {
-    /// What you are recording: picks silence sensitivity and output format.
+    /// What you are recording: picks silence sensitivity, channels and quality.
     #[arg(long, value_enum, default_value = "music")]
     pub mode: Mode,
+    /// Final file format [default: m4a, or the extension of -o].
+    #[arg(long, value_enum)]
+    pub format: Option<Format>,
     /// Loudness (dBFS) below which audio counts as silence
     /// [default: -60 for music, -40 for meeting].
     #[arg(long, allow_negative_numbers = true)]
@@ -123,20 +126,20 @@ pub fn recordings_dir() -> Result<PathBuf> {
 /// `<dir>/recording-YYYYMMDD-HHMMSS.<ext>`.
 pub fn default_output_path(
     dir: &Path,
-    mode: Mode,
+    format: Format,
     now: chrono::DateTime<chrono::Local>,
 ) -> PathBuf {
     dir.join(format!(
         "recording-{}.{}",
         now.format("%Y%m%d-%H%M%S"),
-        mode.output_extension()
+        format.extension()
     ))
 }
 
 /// Default result path for `trim`: `<dir>/<stem>.trimmed.<ext>`.
-fn trimmed_path_for(input: &Path, mode: Mode) -> PathBuf {
+fn trimmed_path_for(input: &Path, format: Format) -> PathBuf {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    input.with_file_name(format!("{stem}.trimmed.{}", mode.output_extension()))
+    input.with_file_name(format!("{stem}.trimmed.{}", format.extension()))
 }
 
 /// Refuses to overwrite existing files.
@@ -212,16 +215,19 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Trim(args) => {
             let mode = args.tuning.mode;
             let settings = args.tuning.settings();
+            let format = resolve_format(args.tuning.format, args.output.as_deref())?;
             let output = args
                 .output
-                .unwrap_or_else(|| trimmed_path_for(&args.input, mode));
+                .unwrap_or_else(|| trimmed_path_for(&args.input, format));
             ensure_absent(&output)?;
-            let outcome = trim_file(&args.input, &output, mode, &settings)?;
+            let outcome = trim_file(&args.input, &output, mode, format, &settings)?;
             Ok(report_outcome(&outcome, &settings))
         }
         Command::Record(args) => {
             let mode = args.tuning.mode;
             let settings = args.tuning.settings();
+            // Validated before anything is recorded, so a bad -o never costs a take.
+            let format = resolve_format(args.tuning.format, args.output.as_deref())?;
             let output = match args.output {
                 Some(path) => path,
                 None => {
@@ -229,11 +235,12 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     let dir = recordings_dir()?;
                     std::fs::create_dir_all(&dir)
                         .with_context(|| format!("cannot create {}", dir.display()))?;
-                    default_output_path(&dir, mode, chrono::Local::now())
+                    default_output_path(&dir, format, chrono::Local::now())
                 }
             };
             let report = record(&RecordOptions {
                 mode,
+                format,
                 settings,
                 output,
                 keep_raw: args.keep_raw,
@@ -300,13 +307,37 @@ mod tests {
             .unwrap();
         let dir = Path::new("/rec");
         assert_eq!(
-            default_output_path(dir, Mode::Music, now),
+            default_output_path(dir, Format::Wav, now),
             PathBuf::from("/rec/recording-20261126-160905.wav")
         );
         assert_eq!(
-            default_output_path(dir, Mode::Meeting, now),
+            default_output_path(dir, Format::M4a, now),
             PathBuf::from("/rec/recording-20261126-160905.m4a")
         );
+    }
+
+    #[test]
+    fn record_parses_format_flag() {
+        let cli = Cli::parse_from(["map-recorder", "record", "--format", "wav"]);
+        let Command::Record(args) = cli.command else {
+            panic!("expected record");
+        };
+        assert_eq!(args.tuning.format, Some(Format::Wav));
+        let cli = Cli::parse_from(["map-recorder", "record"]);
+        let Command::Record(args) = cli.command else {
+            panic!("expected record");
+        };
+        assert_eq!(args.tuning.format, None);
+    }
+
+    #[test]
+    fn record_rejects_bad_output_before_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("take.mp3");
+        let cli = Cli::parse_from(["map-recorder", "record", "-o", output.to_str().unwrap()]);
+        let err = run(cli).unwrap_err().to_string();
+        assert!(err.contains(".wav or .m4a"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

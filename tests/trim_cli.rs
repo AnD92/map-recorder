@@ -51,11 +51,27 @@ fn trim_command_end_to_end() {
         "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let expected = dir.path().join("take.trimmed.wav");
+    let expected = dir.path().join("take.trimmed.m4a");
     assert!(expected.is_file());
-    assert!(stdout.contains("take.trimmed.wav"), "{stdout}");
-    let duration = hound::WavReader::open(&expected).unwrap().duration();
-    assert_eq!(duration, SR * 2 + SR + SR / 2); // 2 s lead + 1 s tone + 0.5 s tail
+    assert!(stdout.contains("take.trimmed.m4a"), "{stdout}");
+}
+
+#[test]
+fn trim_format_wav_writes_wav() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("take.wav");
+    write_wav(&input, 4.0, true, 3.0);
+
+    let out = run(&["trim", input.to_str().unwrap(), "--format", "wav"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = dir.path().join("take.trimmed.wav");
+    let reader = hound::WavReader::open(&expected).unwrap();
+    assert_eq!(reader.spec().bits_per_sample, 24);
+    assert_eq!(reader.duration(), SR * 2 + SR + SR / 2); // 2 s lead + 1 s tone + 0.5 s tail
 }
 
 #[test]
@@ -86,5 +102,5 @@ fn trim_silent_file_exits_2() {
     let out = run(&["trim", input.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stdout).contains("No sound detected"));
-    assert!(!dir.path().join("quiet.trimmed.wav").exists());
+    assert!(!dir.path().join("quiet.trimmed.m4a").exists());
 }

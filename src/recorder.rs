@@ -20,7 +20,7 @@ use crate::audio::io::RawWriter;
 use crate::capture::{StreamFormat, SystemAudioTap};
 use crate::cli::ensure_absent;
 use crate::encode::partial_paths_for;
-use crate::mode::{Mode, Settings, raw_path_for};
+use crate::mode::{Format, Mode, Settings, raw_path_for};
 use crate::process::{TrimOutcome, trim_file};
 
 /// The music raw file (32-bit float WAV) is stopped before WAV's 4 GiB limit.
@@ -52,6 +52,8 @@ pub enum StopReason {
 
 pub struct RecordOptions {
     pub mode: Mode,
+    /// Format of the final, trimmed file.
+    pub format: Format,
     pub settings: Settings,
     pub output: PathBuf,
     pub keep_raw: bool,
@@ -217,13 +219,19 @@ pub fn record(opts: &RecordOptions) -> Result<RecordReport> {
 
     // Trim; on failure the raw file stays on disk and its path is reported.
     println!("Trimming silence…");
-    let outcome =
-        trim_file(&raw_path, &opts.output, opts.mode, &opts.settings).with_context(|| {
-            format!(
-                "trimming failed; the untrimmed recording is kept at {}",
-                raw_path.display()
-            )
-        })?;
+    let outcome = trim_file(
+        &raw_path,
+        &opts.output,
+        opts.mode,
+        opts.format,
+        &opts.settings,
+    )
+    .with_context(|| {
+        format!(
+            "trimming failed; the untrimmed recording is kept at {}",
+            raw_path.display()
+        )
+    })?;
     let raw_kept = !matches!(outcome, TrimOutcome::Written { .. }) || opts.keep_raw;
     if !raw_kept {
         std::fs::remove_file(&raw_path)

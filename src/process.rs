@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use crate::audio::io::RawReader;
 use crate::encode::FinalWriter;
-use crate::mode::{Mode, Settings};
+use crate::mode::{Format, Mode, Settings};
 use crate::trim::{FADE_SECS, LoudnessAnalyzer, fade_gain, find_trim_range};
 
 /// Result of trimming a recording.
@@ -32,11 +32,13 @@ pub enum TrimOutcome {
 pub const CHUNK_FRAMES: usize = 4096;
 
 /// Trims `input` according to `settings` and writes the result to `output`
-/// in the format of `mode`. Writes nothing when no sound is found.
+/// as `final_format`, with the channels and quality of `mode`. Writes nothing
+/// when no sound is found.
 pub fn trim_file(
     input: &Path,
     output: &Path,
     mode: Mode,
+    final_format: Format,
     settings: &Settings,
 ) -> Result<TrimOutcome> {
     let mut buf = Vec::with_capacity(CHUNK_FRAMES * 2);
@@ -59,10 +61,6 @@ pub fn trim_file(
     let fade_frames = (format.sample_rate as f64 * FADE_SECS).round() as u64;
     let kept_frames = range.end_frame - range.start_frame;
     let mut reader = RawReader::open(input)?;
-    let final_format = match mode {
-        Mode::Music => crate::mode::Format::Wav,
-        Mode::Meeting => crate::mode::Format::M4a,
-    };
     let mut writer = FinalWriter::create(mode, final_format, output, format)?;
     let mut position = 0u64; // index of the first frame in `buf`
     loop {
@@ -143,7 +141,14 @@ mod tests {
         let out = dir.path().join("r.wav");
         write_raw(&raw, &standard_signal());
 
-        let outcome = trim_file(&raw, &out, Mode::Music, &Mode::Music.defaults()).unwrap();
+        let outcome = trim_file(
+            &raw,
+            &out,
+            Mode::Music,
+            Format::Wav,
+            &Mode::Music.defaults(),
+        )
+        .unwrap();
         let TrimOutcome::Written {
             path,
             kept_secs,
@@ -175,7 +180,14 @@ mod tests {
         let out = dir.path().join("f.wav");
         let signal: Vec<f32> = [vec![0.5f32; SR as usize * 2], silence(2.0)].concat();
         write_raw(&raw, &signal);
-        trim_file(&raw, &out, Mode::Music, &Mode::Music.defaults()).unwrap();
+        trim_file(
+            &raw,
+            &out,
+            Mode::Music,
+            Format::Wav,
+            &Mode::Music.defaults(),
+        )
+        .unwrap();
 
         let mut reader = hound::WavReader::open(&out).unwrap();
         let samples: Vec<i32> = reader.samples::<i32>().map(Result::unwrap).collect();
@@ -191,7 +203,14 @@ mod tests {
         let raw = dir.path().join("m.raw.caf");
         let out = dir.path().join("m.m4a");
         write_raw(&raw, &standard_signal());
-        let outcome = trim_file(&raw, &out, Mode::Meeting, &Mode::Meeting.defaults()).unwrap();
+        let outcome = trim_file(
+            &raw,
+            &out,
+            Mode::Meeting,
+            Format::M4a,
+            &Mode::Meeting.defaults(),
+        )
+        .unwrap();
         assert!(
             matches!(outcome, TrimOutcome::Written { .. }),
             "{outcome:?}"
@@ -205,7 +224,14 @@ mod tests {
         let raw = dir.path().join("s.raw.wav");
         let out = dir.path().join("s.wav");
         write_raw(&raw, &silence(3.0));
-        let outcome = trim_file(&raw, &out, Mode::Music, &Mode::Music.defaults()).unwrap();
+        let outcome = trim_file(
+            &raw,
+            &out,
+            Mode::Music,
+            Format::Wav,
+            &Mode::Music.defaults(),
+        )
+        .unwrap();
         assert_eq!(outcome, TrimOutcome::NoSound);
         assert!(!out.exists());
     }
@@ -216,7 +242,14 @@ mod tests {
         let raw = dir.path().join("e.raw.caf");
         let out = dir.path().join("e.m4a");
         write_raw(&raw, &[]);
-        let outcome = trim_file(&raw, &out, Mode::Meeting, &Mode::Meeting.defaults()).unwrap();
+        let outcome = trim_file(
+            &raw,
+            &out,
+            Mode::Meeting,
+            Format::M4a,
+            &Mode::Meeting.defaults(),
+        )
+        .unwrap();
         assert_eq!(outcome, TrimOutcome::NoSound);
         assert!(!out.exists());
     }

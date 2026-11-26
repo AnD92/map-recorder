@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-/// What is being recorded. The mode picks silence sensitivity and file formats.
+/// What is being recorded. The mode picks silence sensitivity, channels and
+/// compression quality; `Format` picks the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Mode {
-    /// Music: strict silence detection, lossless WAV output.
+    /// Music: strict silence detection, stereo, high-quality AAC (256 kbps).
     Music,
-    /// Meetings / speech: lenient silence detection, compact AAC output.
+    /// Meetings / speech: lenient silence detection, mono, compact AAC (64 kbps).
     Meeting,
 }
 
@@ -99,14 +100,6 @@ impl Mode {
             Mode::Meeting => "caf",
         }
     }
-
-    /// Extension of the final, trimmed file.
-    pub fn output_extension(self) -> &'static str {
-        match self {
-            Mode::Music => "wav",
-            Mode::Meeting => "m4a",
-        }
-    }
 }
 
 /// Path of the untrimmed capture that sits next to the final output,
@@ -141,11 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn extensions_per_mode() {
+    fn raw_extensions_per_mode() {
         assert_eq!(Mode::Music.raw_extension(), "wav");
         assert_eq!(Mode::Meeting.raw_extension(), "caf");
-        assert_eq!(Mode::Music.output_extension(), "wav");
-        assert_eq!(Mode::Meeting.output_extension(), "m4a");
     }
 
     #[test]
