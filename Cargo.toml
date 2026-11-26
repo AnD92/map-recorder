@@ -2,6 +2,11 @@
 name = "map-recorder"
 version = "0.1.0"
 edition = "2024"
+description = "Record everything your Mac plays, then trim the silence around it"
+license = "MIT"
+readme = "README.md"
+keywords = ["audio", "recording", "macos", "coreaudio", "cli"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 anyhow = "1.0.105"
