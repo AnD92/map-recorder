@@ -6,4 +6,5 @@ pub mod cli;
 pub mod encode;
 pub mod mode;
 pub mod process;
+pub mod recorder;
 pub mod trim;

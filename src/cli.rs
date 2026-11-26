@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::mode::{Mode, Settings};
 use crate::process::{TrimOutcome, trim_file};
+use crate::recorder::{RecordOptions, RecordReport, StopReason, record};
 
 /// Record everything your Mac plays, then trim the silence around it.
 #[derive(Parser)]
@@ -129,6 +130,34 @@ pub fn report_outcome(outcome: &TrimOutcome, settings: &Settings) -> ExitCode {
     }
 }
 
+/// Prints the summary of a recording session and returns the exit code.
+fn report_recording(report: &RecordReport, settings: &Settings) -> ExitCode {
+    println!("Recorded {:.1} s of audio.", report.duration_secs);
+    match report.stop_reason {
+        StopReason::SizeLimit => println!(
+            "Warning: stopped automatically because the WAV file reached its size limit (about 3 hours). Use --mode meeting for longer sessions."
+        ),
+        StopReason::Error => println!("Warning: recording stopped because of a write error."),
+        StopReason::User => {}
+    }
+    if report.overruns > 0 {
+        println!(
+            "Warning: {} audio buffers were dropped because the disk could not keep up.",
+            report.overruns
+        );
+    }
+    let code = report_outcome(&report.outcome, settings);
+    if report.outcome == TrimOutcome::NoSound {
+        println!(
+            "If audio was playing, check that your terminal has the System Audio Recording permission (see README → Troubleshooting)."
+        );
+    }
+    if report.raw_kept {
+        println!("Untrimmed recording kept at {}", report.raw_path.display());
+    }
+    code
+}
+
 /// Runs the parsed command and returns the process exit code.
 pub fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -142,9 +171,19 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let outcome = trim_file(&args.input, &output, mode, &settings)?;
             Ok(report_outcome(&outcome, &settings))
         }
-        Command::Record(_) => {
-            eprintln!("not implemented yet");
-            Ok(ExitCode::FAILURE)
+        Command::Record(args) => {
+            let mode = args.tuning.mode;
+            let settings = args.tuning.settings();
+            let output = args
+                .output
+                .unwrap_or_else(|| default_output_path(mode, chrono::Local::now()));
+            let report = record(&RecordOptions {
+                mode,
+                settings,
+                output,
+                keep_raw: args.keep_raw,
+            })?;
+            Ok(report_recording(&report, &settings))
         }
     }
 }
