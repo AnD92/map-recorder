@@ -36,6 +36,13 @@ pub enum Command {
     Trim(TrimArgs),
     /// Convert existing audio files to compact .m4a (no trimming).
     Convert(ConvertArgs),
+    /// Print a shell completion script
+    /// (add `source <(map-recorder completions zsh)` to ~/.zshrc).
+    Completions {
+        /// Shell to generate the script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Args)]
@@ -87,9 +94,10 @@ impl TuningArgs {
 #[derive(Args)]
 pub struct TrimArgs {
     /// The recording to trim (.wav or .caf).
+    #[arg(value_hint = ValueHint::FilePath)]
     pub input: PathBuf,
     /// Where to write the result [default: <input>.trimmed.<wav|m4a>].
-    #[arg(short, long)]
+    #[arg(short, long, value_hint = ValueHint::FilePath)]
     pub output: Option<PathBuf>,
     #[command(flatten)]
     pub tuning: TuningArgs,
@@ -100,7 +108,7 @@ pub struct RecordArgs {
     /// Where to write the result
     /// [default: ~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.<wav|m4a>,
     /// folder overridable with MAP_RECORDER_DIR].
-    #[arg(short, long)]
+    #[arg(short, long, value_hint = ValueHint::FilePath)]
     pub output: Option<PathBuf>,
     /// Keep the untrimmed capture next to the result.
     #[arg(long)]
@@ -256,6 +264,16 @@ fn run_convert(args: ConvertArgs) -> Result<ExitCode> {
 pub fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Convert(args) => run_convert(args),
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "map-recorder",
+                &mut std::io::stdout(),
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Trim(args) => {
             let mode = args.tuning.mode;
             let settings = args.tuning.settings();
@@ -308,6 +326,22 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("map-recorder record --help"), "{help}");
+    }
+
+    #[test]
+    fn zsh_completions_cover_commands_and_formats() {
+        use clap::CommandFactory;
+        let mut script = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Zsh,
+            &mut Cli::command(),
+            "map-recorder",
+            &mut script,
+        );
+        let script = String::from_utf8(script).unwrap();
+        for needle in ["convert", "completions", "--format", "m4a", "_files"] {
+            assert!(script.contains(needle), "missing {needle}");
+        }
     }
 
     #[test]

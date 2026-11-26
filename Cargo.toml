@@ -14,6 +14,7 @@ anyhow = "1.0.105"
 block2 = "0.6.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.10", features = ["derive"] }
+clap_complete = "4.6.12"
 ctrlc = { version = "3.5.3", features = ["termination"] }
 hound = "3.5.1"
 objc2 = "0.6.5"
