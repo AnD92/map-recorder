@@ -39,8 +39,9 @@ and to type commands and file names faster.
 ### `--format <m4a|wav>` (record, trim)
 
 - Default `m4a` for both modes.
-- `music` + `m4a`: AAC, stereo (original channel count), original sample rate,
-  256 kbps.
+- `music` + `m4a`: AAC, original channel count, 48 kHz, 256 kbps. (Always
+  48 kHz: Apple's encoder rejects 256 kbps at low rates such as 22.05 kHz;
+  resampling 44.1 → 48 kHz is inaudible. Verified with `afconvert`.)
 - `meeting` + `m4a`: unchanged — AAC, mono, 48 kHz, 64 kbps.
 - `music` + `wav`: unchanged — 24-bit PCM WAV, original rate/channels.
 - `meeting` + `wav`: mono 24-bit WAV (builder's call: keeps the meeting
@@ -50,9 +51,9 @@ and to type commands and file names faster.
 - Raw capture during recording is unchanged (`.raw.wav` for music, `.raw.caf`
   for meeting); conversion happens after trimming, as meeting mode does today.
   The music path writes a temporary file and runs `afconvert`, like meeting.
-- An `-o` path whose extension disagrees with `--format` is the builder's
-  call; suggested: the extension of `-o` wins when it is `.wav`/`.m4a` and no
-  `--format` was given, otherwise error with a clear message.
+- With `-o`, its extension must be `.wav` or `.m4a` (case-insensitive). With
+  no `--format`, that extension picks the format; with `--format`, they must
+  agree. Anything else is an error with a clear message.
 
 ### `convert <FILES>...`
 
