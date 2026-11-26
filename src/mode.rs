@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::{Result, bail};
+
 /// What is being recorded. The mode picks silence sensitivity and file formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Mode {
@@ -9,6 +11,57 @@ pub enum Mode {
     Music,
     /// Meetings / speech: lenient silence detection, compact AAC output.
     Meeting,
+}
+
+/// Container and codec of the final, trimmed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    /// Compact AAC in an .m4a file; plays on phones, Macs and music apps.
+    M4a,
+    /// Lossless 24-bit PCM WAV.
+    Wav,
+}
+
+impl Format {
+    /// File extension used for this format, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::M4a => "m4a",
+            Format::Wav => "wav",
+        }
+    }
+
+    /// The format whose extension matches `path` (case-insensitive), if any.
+    fn from_path(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        [Format::M4a, Format::Wav]
+            .into_iter()
+            .find(|format| format.extension() == ext)
+    }
+}
+
+/// Picks the final format from the `--format` flag and the `-o` path.
+///
+/// Without `-o` the flag decides (default m4a). With `-o` its extension must
+/// be `.wav` or `.m4a`: it decides when no flag is given and must agree with
+/// the flag otherwise, so the file name never lies about its content.
+pub fn resolve_format(flag: Option<Format>, output: Option<&Path>) -> Result<Format> {
+    let Some(output) = output else {
+        return Ok(flag.unwrap_or(Format::M4a));
+    };
+    let Some(from_name) = Format::from_path(output) else {
+        bail!("output file {} must end in .wav or .m4a", output.display());
+    };
+    match flag {
+        Some(flag) if flag != from_name => {
+            let ext = flag.extension();
+            bail!(
+                "--format {ext} does not match the output file {}; use a .{ext} name or drop --format",
+                output.display()
+            )
+        }
+        _ => Ok(from_name),
+    }
 }
 
 /// Parameters of the silence trimming.
@@ -93,6 +146,58 @@ mod tests {
         assert_eq!(Mode::Meeting.raw_extension(), "caf");
         assert_eq!(Mode::Music.output_extension(), "wav");
         assert_eq!(Mode::Meeting.output_extension(), "m4a");
+    }
+
+    #[test]
+    fn format_extensions() {
+        assert_eq!(Format::M4a.extension(), "m4a");
+        assert_eq!(Format::Wav.extension(), "wav");
+    }
+
+    #[test]
+    fn resolve_format_defaults_to_m4a() {
+        assert_eq!(resolve_format(None, None).unwrap(), Format::M4a);
+    }
+
+    #[test]
+    fn resolve_format_flag_without_output() {
+        assert_eq!(
+            resolve_format(Some(Format::Wav), None).unwrap(),
+            Format::Wav
+        );
+    }
+
+    #[test]
+    fn resolve_format_from_output_extension_any_case() {
+        assert_eq!(
+            resolve_format(None, Some(Path::new("a/Song.WAV"))).unwrap(),
+            Format::Wav
+        );
+        assert_eq!(
+            resolve_format(None, Some(Path::new("call.m4a"))).unwrap(),
+            Format::M4a
+        );
+    }
+
+    #[test]
+    fn resolve_format_rejects_unknown_extension() {
+        let err = resolve_format(None, Some(Path::new("take.mp3")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(".wav") && err.contains(".m4a"), "{err}");
+        assert!(resolve_format(None, Some(Path::new("take"))).is_err());
+    }
+
+    #[test]
+    fn resolve_format_rejects_flag_extension_mismatch() {
+        let err = resolve_format(Some(Format::Wav), Some(Path::new("take.m4a")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--format wav"), "{err}");
+        assert_eq!(
+            resolve_format(Some(Format::M4a), Some(Path::new("t.M4A"))).unwrap(),
+            Format::M4a
+        );
     }
 
     #[test]
