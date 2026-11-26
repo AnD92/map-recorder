@@ -79,5 +79,8 @@ and to type commands and file names faster.
 
 - README: new defaults, `--format`, `convert`, completions, updated size
   figures and output table. `CLAUDE.md` module map updated.
+- CLI help: update the `EXAMPLES` block in `src/cli.rs` (shown by
+  `map-recorder --help`) to cover the m4a default, `--format wav`, `convert`
+  and `completions`.
 - TDD as usual; `afconvert`-backed tests check results with `afinfo`
   (channels, codec, sample rate), as the existing meeting test does.
