@@ -220,8 +220,10 @@ map-recorder trim <input.wav|input.caf> [--mode music|meeting] [-o <path>] [opti
   re-processing a kept raw file with different thresholds, and for testing
   the trimming without capturing. *(Builder-facing addition; my call.)*
 - Default mode: `music`.
-- Default output path: `./recording-YYYYMMDD-HHMMSS.<ext>` in the current
-  directory.
+- Default output path: `~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.<ext>`
+  (folder created automatically). The folder can be changed with the
+  `MAP_RECORDER_DIR` environment variable; `-o` overrides it per recording.
+  *(Changed 2026-11-26 at the user's request; was the current directory.)*
 
 ### 8.2 Options (both commands)
 

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use crate::mode::{Mode, Settings};
@@ -69,7 +69,9 @@ pub struct TrimArgs {
 
 #[derive(Args)]
 pub struct RecordArgs {
-    /// Where to write the result [default: ./recording-YYYYMMDD-HHMMSS.<wav|m4a>].
+    /// Where to write the result
+    /// [default: ~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.<wav|m4a>,
+    /// folder overridable with MAP_RECORDER_DIR].
     #[arg(short, long)]
     pub output: Option<PathBuf>,
     /// Keep the untrimmed capture next to the result.
@@ -83,8 +85,39 @@ pub struct RecordArgs {
 pub const EXIT_NO_SOUND: u8 = 2;
 
 /// `recording-YYYYMMDD-HHMMSS.<ext>` in the current directory.
-pub fn default_output_path(mode: Mode, now: chrono::DateTime<chrono::Local>) -> PathBuf {
-    PathBuf::from(format!(
+/// Environment variable that overrides the default recordings folder.
+pub const DIR_ENV_VAR: &str = "MAP_RECORDER_DIR";
+
+/// Folder where `record` saves files when `-o` is not given:
+/// `$MAP_RECORDER_DIR` if set and non-empty, otherwise `~/Music/map-recorder`.
+pub fn recordings_dir_from(
+    env_override: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(dir) = env_override.filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    match home {
+        Some(home) => Ok(home.join("Music").join("map-recorder")),
+        None => bail!("cannot determine your home folder; set {DIR_ENV_VAR} or use -o"),
+    }
+}
+
+/// The recordings folder for the current user and environment.
+pub fn recordings_dir() -> Result<PathBuf> {
+    recordings_dir_from(
+        std::env::var_os(DIR_ENV_VAR),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// `<dir>/recording-YYYYMMDD-HHMMSS.<ext>`.
+pub fn default_output_path(
+    dir: &Path,
+    mode: Mode,
+    now: chrono::DateTime<chrono::Local>,
+) -> PathBuf {
+    dir.join(format!(
         "recording-{}.{}",
         now.format("%Y%m%d-%H%M%S"),
         mode.output_extension()
@@ -174,9 +207,16 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Command::Record(args) => {
             let mode = args.tuning.mode;
             let settings = args.tuning.settings();
-            let output = args
-                .output
-                .unwrap_or_else(|| default_output_path(mode, chrono::Local::now()));
+            let output = match args.output {
+                Some(path) => path,
+                None => {
+                    // Default location: create the recordings folder on first use.
+                    let dir = recordings_dir()?;
+                    std::fs::create_dir_all(&dir)
+                        .with_context(|| format!("cannot create {}", dir.display()))?;
+                    default_output_path(&dir, mode, chrono::Local::now())
+                }
+            };
             let report = record(&RecordOptions {
                 mode,
                 settings,
@@ -232,13 +272,43 @@ mod tests {
         let now = chrono::Local
             .with_ymd_and_hms(2026, 11, 26, 16, 9, 5)
             .unwrap();
+        let dir = Path::new("/rec");
         assert_eq!(
-            default_output_path(Mode::Music, now),
-            PathBuf::from("recording-20261126-160905.wav")
+            default_output_path(dir, Mode::Music, now),
+            PathBuf::from("/rec/recording-20261126-160905.wav")
         );
         assert_eq!(
-            default_output_path(Mode::Meeting, now),
-            PathBuf::from("recording-20261126-160905.m4a")
+            default_output_path(dir, Mode::Meeting, now),
+            PathBuf::from("/rec/recording-20261126-160905.m4a")
         );
+    }
+
+    #[test]
+    fn recordings_dir_defaults_to_music_folder() {
+        assert_eq!(
+            recordings_dir_from(None, Some(PathBuf::from("/Users/me"))).unwrap(),
+            PathBuf::from("/Users/me/Music/map-recorder")
+        );
+    }
+
+    #[test]
+    fn recordings_dir_env_override_wins() {
+        assert_eq!(
+            recordings_dir_from(Some("/tmp/rec".into()), Some(PathBuf::from("/Users/me"))).unwrap(),
+            PathBuf::from("/tmp/rec")
+        );
+    }
+
+    #[test]
+    fn recordings_dir_ignores_empty_override() {
+        assert_eq!(
+            recordings_dir_from(Some("".into()), Some(PathBuf::from("/Users/me"))).unwrap(),
+            PathBuf::from("/Users/me/Music/map-recorder")
+        );
+    }
+
+    #[test]
+    fn recordings_dir_without_home_is_an_error() {
+        assert!(recordings_dir_from(None, None).is_err());
     }
 }
