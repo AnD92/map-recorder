@@ -61,6 +61,40 @@ cargo build --release
 ./target/release/map-recorder --help
 ```
 
+### Run `map-recorder` from anywhere
+
+To type just `map-recorder <command>` in any terminal, without pointing at the
+project folder, install the binary into Cargo's `bin` directory:
+
+1. Make sure `~/.cargo/bin` is on your `PATH`. The Rust installer usually sets
+   this up; if `cargo --version` fails in a new terminal, add this line to
+   `~/.zshrc` and open a new terminal:
+
+   ```sh
+   . "$HOME/.cargo/env"
+   ```
+
+2. From the project folder, build and install an optimised binary:
+
+   ```sh
+   cargo install --path .
+   ```
+
+3. Open a new terminal and use it from any folder:
+
+   ```sh
+   map-recorder --help
+   map-recorder record
+   map-recorder record --mode meeting
+   ```
+
+> **Rebuild after every change.** The installed binary is a copy and does not
+> follow the source code. After pulling updates or editing the project, run
+> `cargo install --path .` again from the project folder (if you installed with
+> `cargo install --git …`, re-run that command with `--force`).
+>
+> To remove it: `cargo uninstall map-recorder`.
+
 ## First run: grant the permission
 
 macOS protects system audio behind the **System Audio Recording** privacy
