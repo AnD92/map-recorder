@@ -59,7 +59,11 @@ pub fn trim_file(
     let fade_frames = (format.sample_rate as f64 * FADE_SECS).round() as u64;
     let kept_frames = range.end_frame - range.start_frame;
     let mut reader = RawReader::open(input)?;
-    let mut writer = FinalWriter::create(mode, output, format)?;
+    let final_format = match mode {
+        Mode::Music => crate::mode::Format::Wav,
+        Mode::Meeting => crate::mode::Format::M4a,
+    };
+    let mut writer = FinalWriter::create(mode, final_format, output, format)?;
     let mut position = 0u64; // index of the first frame in `buf`
     loop {
         let read = reader.read_frames(&mut buf, CHUNK_FRAMES)? as u64;

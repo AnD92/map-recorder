@@ -1,9 +1,11 @@
-//! Writes the final, trimmed recording in the format of the selected mode.
+//! Writes the final, trimmed recording in the selected format.
 //!
-//! - `music`: 24-bit PCM WAV, original sample rate and channels (lossless).
-//! - `meeting`: AAC in an `.m4a` file, mono, 48 kHz, 64 kbps. Samples are
-//!   downmixed to mono into a temporary CAF, then converted with macOS's
-//!   built-in `afconvert` tool.
+//! - `Format::Wav`: 24-bit PCM WAV at the original sample rate (lossless).
+//! - `Format::M4a`: AAC in an `.m4a` file, 48 kHz. Samples go to a temporary
+//!   float CAF, then macOS's built-in `afconvert` tool encodes it.
+//!
+//! The mode picks channels and AAC quality: `music` keeps the original
+//! channels (256 kbps AAC); `meeting` downmixes to mono (64 kbps AAC).
 //!
 //! The file is written under a `.part` name and renamed when complete, so a
 //! file with the final name is always a finished one.
@@ -17,29 +19,63 @@ use anyhow::{Context, Result, bail};
 
 use crate::audio::caf::CafWriter;
 use crate::capture::StreamFormat;
-use crate::mode::Mode;
+use crate::mode::{Format, Mode};
 
 /// Full-scale value of a signed 24-bit sample.
 const I24_MAX: f32 = 8_388_607.0;
 
-/// Writer for the final file of a recording.
-pub struct FinalWriter {
-    inner: Inner,
+/// Sample rate of every AAC file. Apple's encoder rejects high bitrates at
+/// low rates (e.g. 256 kbps at 22.05 kHz), and 48 kHz suits any source.
+const AAC_SAMPLE_RATE: u32 = 48_000;
+
+/// AAC encoding parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AacSettings {
+    /// Target bitrate in bits per second.
+    pub bitrate: u32,
+    /// Downmix to a single channel.
+    pub mono: bool,
 }
 
-enum Inner {
-    /// 24-bit PCM WAV written directly.
-    Music {
+/// AAC quality for a mode: transparent stereo for music, compact mono for
+/// speech.
+pub fn aac_settings(mode: Mode) -> AacSettings {
+    match mode {
+        Mode::Music => AacSettings {
+            bitrate: 256_000,
+            mono: false,
+        },
+        Mode::Meeting => AacSettings {
+            bitrate: 64_000,
+            mono: true,
+        },
+    }
+}
+
+/// Writer for the final file of a recording.
+pub struct FinalWriter {
+    /// Channels of the incoming interleaved samples.
+    in_channels: usize,
+    /// Average each frame into one sample before writing.
+    downmix: bool,
+    /// Reused buffer for downmixed samples.
+    mono: Vec<f32>,
+    sink: Sink,
+}
+
+/// Destination of the samples.
+enum Sink {
+    /// 24-bit PCM WAV written directly to the `.part` file.
+    Wav {
         writer: hound::WavWriter<BufWriter<File>>,
-        path: PathBuf,
+        final_path: PathBuf,
     },
-    /// Mono float CAF written to a temporary file, converted on `finish`.
-    Meeting {
+    /// Float CAF written to a temporary file, encoded to AAC on `finish`.
+    Aac {
         temp: CafWriter,
         temp_path: PathBuf,
         final_path: PathBuf,
-        channels: usize,
-        mono: Vec<f32>,
+        settings: AacSettings,
     },
 }
 
@@ -52,13 +88,13 @@ pub fn partial_paths_for(final_path: &Path) -> [PathBuf; 2] {
 
 /// File the final output is written to before being renamed into place,
 /// e.g. `song.wav.part`.
-fn part_path_for(final_path: &Path) -> PathBuf {
+pub(crate) fn part_path_for(final_path: &Path) -> PathBuf {
     let name = final_path.file_name().unwrap_or_default().to_string_lossy();
     final_path.with_file_name(format!("{name}.part"))
 }
 
 /// Moves a completed `.part` file to its final name; removes it on failure.
-fn publish(part: &Path, final_path: &Path) -> Result<()> {
+pub(crate) fn publish(part: &Path, final_path: &Path) -> Result<()> {
     std::fs::rename(part, final_path).map_err(|error| {
         let _ = std::fs::remove_file(part);
         anyhow::Error::from(error).context(format!("cannot create {}", final_path.display()))
@@ -72,85 +108,96 @@ fn temp_path_for(final_path: &Path) -> PathBuf {
 }
 
 impl FinalWriter {
-    pub fn create(mode: Mode, final_path: &Path, format: StreamFormat) -> Result<Self> {
-        let inner = match mode {
-            Mode::Music => {
+    pub fn create(
+        mode: Mode,
+        format: Format,
+        final_path: &Path,
+        stream: StreamFormat,
+    ) -> Result<Self> {
+        let in_channels = stream.channels.max(1);
+        let downmix = mode == Mode::Meeting && in_channels > 1;
+        let out_channels = if downmix { 1 } else { in_channels };
+        let sink = match format {
+            Format::Wav => {
                 let spec = hound::WavSpec {
-                    channels: format.channels,
-                    sample_rate: format.sample_rate,
+                    channels: out_channels,
+                    sample_rate: stream.sample_rate,
                     bits_per_sample: 24,
                     sample_format: hound::SampleFormat::Int,
                 };
                 let part = part_path_for(final_path);
-                Inner::Music {
+                Sink::Wav {
                     writer: hound::WavWriter::create(&part, spec)
                         .with_context(|| format!("cannot create {}", part.display()))?,
-                    path: final_path.to_path_buf(),
+                    final_path: final_path.to_path_buf(),
                 }
             }
-            Mode::Meeting => {
+            Format::M4a => {
                 let temp_path = temp_path_for(final_path);
-                let temp = CafWriter::create(&temp_path, format.sample_rate, 1)
+                let temp = CafWriter::create(&temp_path, stream.sample_rate, out_channels)
                     .with_context(|| format!("cannot create {}", temp_path.display()))?;
-                Inner::Meeting {
+                Sink::Aac {
                     temp,
                     temp_path,
                     final_path: final_path.to_path_buf(),
-                    channels: format.channels.max(1) as usize,
-                    mono: Vec::new(),
+                    settings: aac_settings(mode),
                 }
             }
         };
-        Ok(Self { inner })
+        Ok(Self {
+            in_channels: in_channels as usize,
+            downmix,
+            mono: Vec::new(),
+            sink,
+        })
     }
 
     /// Appends interleaved samples in the recording's original layout.
     pub fn write(&mut self, interleaved: &[f32]) -> Result<()> {
-        match &mut self.inner {
-            Inner::Music { writer, .. } => {
-                for &sample in interleaved {
+        let samples = if self.downmix {
+            // Each output sample is the average of its frame.
+            let channels = self.in_channels;
+            self.mono.clear();
+            self.mono.extend(
+                interleaved
+                    .chunks(channels)
+                    .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+            );
+            &self.mono[..]
+        } else {
+            interleaved
+        };
+        match &mut self.sink {
+            Sink::Wav { writer, .. } => {
+                for &sample in samples {
                     writer.write_sample((sample.clamp(-1.0, 1.0) * I24_MAX).round() as i32)?;
                 }
             }
-            Inner::Meeting {
-                temp,
-                channels,
-                mono,
-                ..
-            } => {
-                // Downmix: each output sample is the average of its frame.
-                mono.clear();
-                mono.extend(
-                    interleaved
-                        .chunks(*channels)
-                        .map(|frame| frame.iter().sum::<f32>() / *channels as f32),
-                );
-                temp.write_samples(mono)?;
-            }
+            Sink::Aac { temp, .. } => temp.write_samples(samples)?,
         }
         Ok(())
     }
 
-    /// Completes the file and returns its path. For meetings this runs the
-    /// AAC conversion; the temporary file is removed whether it succeeds or not.
+    /// Completes the file and returns its path. For AAC this runs the
+    /// conversion; the temporary file is removed whether it succeeds or not.
     pub fn finish(self) -> Result<PathBuf> {
-        match self.inner {
-            Inner::Music { writer, path } => {
+        match self.sink {
+            Sink::Wav { writer, final_path } => {
                 writer.finalize()?;
-                publish(&part_path_for(&path), &path)?;
-                Ok(path)
+                publish(&part_path_for(&final_path), &final_path)?;
+                Ok(final_path)
             }
-            Inner::Meeting {
+            Sink::Aac {
                 temp,
                 temp_path,
                 final_path,
-                ..
+                settings,
             } => {
                 let part = part_path_for(&final_path);
                 let result = temp
                     .finalize()
                     .map_err(anyhow::Error::from)
-                    .and_then(|()| convert_to_aac(&temp_path, &part))
+                    .and_then(|()| convert_to_aac(&temp_path, &part, settings))
                     .and_then(|()| publish(&part, &final_path));
                 let _ = std::fs::remove_file(&temp_path);
                 result.map(|()| final_path)
@@ -159,11 +206,19 @@ impl FinalWriter {
     }
 }
 
-/// Converts a CAF file into a mono, 48 kHz, 64 kbps AAC `.m4a` using the
-/// `afconvert` tool that ships with macOS.
-fn convert_to_aac(input: &Path, output: &Path) -> Result<()> {
-    let result = Command::new("afconvert")
-        .args(["-f", "m4af", "-d", "aac@48000", "-b", "64000", "-c", "1"])
+/// Encodes any audio file macOS can read into a 48 kHz AAC `.m4a` using the
+/// `afconvert` tool that ships with macOS. Removes `output` on failure.
+pub fn convert_to_aac(input: &Path, output: &Path, settings: AacSettings) -> Result<()> {
+    let mut command = Command::new("afconvert");
+    command
+        .args(["-f", "m4af", "-d"])
+        .arg(format!("aac@{AAC_SAMPLE_RATE}"))
+        .arg("-b")
+        .arg(settings.bitrate.to_string());
+    if settings.mono {
+        command.args(["-c", "1"]);
+    }
+    let result = command
         .arg(input)
         .arg(output)
         .output()
@@ -202,7 +257,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
         };
-        let mut writer = FinalWriter::create(Mode::Music, &path, format).unwrap();
+        let mut writer = FinalWriter::create(Mode::Music, Format::Wav, &path, format).unwrap();
         writer.write(&tone(1_000, 2, 0.5)).unwrap();
         assert_eq!(writer.finish().unwrap(), path);
 
@@ -218,13 +273,18 @@ mod tests {
     #[test]
     fn final_name_appears_only_when_finished() {
         let dir = tempfile::tempdir().unwrap();
-        for (mode, name) in [(Mode::Music, "a.wav"), (Mode::Meeting, "a.m4a")] {
+        for (mode, format_, name) in [
+            (Mode::Music, Format::Wav, "a.wav"),
+            (Mode::Music, Format::M4a, "b.m4a"),
+            (Mode::Meeting, Format::M4a, "c.m4a"),
+            (Mode::Meeting, Format::Wav, "d.wav"),
+        ] {
             let path = dir.path().join(name);
             let format = StreamFormat {
                 sample_rate: 48_000,
                 channels: 2,
             };
-            let mut writer = FinalWriter::create(mode, &path, format).unwrap();
+            let mut writer = FinalWriter::create(mode, format_, &path, format).unwrap();
             writer.write(&tone(4_800, 2, 0.5)).unwrap();
             assert!(!path.exists(), "{name} must not exist before finish");
             writer.finish().unwrap();
@@ -243,12 +303,99 @@ mod tests {
             sample_rate: 48_000,
             channels: 1,
         };
-        let mut writer = FinalWriter::create(Mode::Music, &path, format).unwrap();
+        let mut writer = FinalWriter::create(Mode::Music, Format::Wav, &path, format).unwrap();
         writer.write(&[1.5, -1.5, 0.5]).unwrap();
         writer.finish().unwrap();
         let mut reader = hound::WavReader::open(&path).unwrap();
         let samples: Vec<i32> = reader.samples::<i32>().map(Result::unwrap).collect();
         assert_eq!(samples, vec![8_388_607, -8_388_607, 4_194_304]);
+    }
+
+    /// `afinfo` output for `path`, lowercased.
+    fn afinfo(path: &Path) -> String {
+        let out = Command::new("afinfo").arg(path).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_lowercase()
+    }
+
+    fn dir_names(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect()
+    }
+
+    #[test]
+    fn music_m4a_is_stereo_aac_48k() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.m4a");
+        let format = StreamFormat {
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        let mut writer = FinalWriter::create(Mode::Music, Format::M4a, &path, format).unwrap();
+        writer.write(&tone(44_100, 2, 0.5)).unwrap();
+        assert_eq!(writer.finish().unwrap(), path);
+        let info = afinfo(&path);
+        assert!(info.contains("aac"), "{info}");
+        assert!(info.contains("2 ch"), "{info}");
+        assert!(info.contains("48000"), "{info}");
+        assert_eq!(
+            dir_names(dir.path()),
+            vec![std::ffi::OsString::from("song.m4a")]
+        );
+    }
+
+    #[test]
+    fn music_m4a_keeps_mono_source_mono() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mono.m4a");
+        let format = StreamFormat {
+            sample_rate: 44_100,
+            channels: 1,
+        };
+        let mut writer = FinalWriter::create(Mode::Music, Format::M4a, &path, format).unwrap();
+        writer.write(&tone(44_100, 1, 0.5)).unwrap();
+        writer.finish().unwrap();
+        let info = afinfo(&path);
+        assert!(info.contains("1 ch"), "{info}");
+        assert!(info.contains("48000"), "{info}");
+    }
+
+    #[test]
+    fn meeting_wav_is_mono_24bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("call.wav");
+        let format = StreamFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let mut writer = FinalWriter::create(Mode::Meeting, Format::Wav, &path, format).unwrap();
+        writer.write(&tone(1_000, 2, 0.5)).unwrap();
+        writer.finish().unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.bits_per_sample, 24);
+        assert_eq!(spec.sample_rate, 48_000);
+        assert_eq!(reader.len(), 1_000);
+    }
+
+    #[test]
+    fn aac_settings_per_mode() {
+        assert_eq!(
+            aac_settings(Mode::Music),
+            AacSettings {
+                bitrate: 256_000,
+                mono: false
+            }
+        );
+        assert_eq!(
+            aac_settings(Mode::Meeting),
+            AacSettings {
+                bitrate: 64_000,
+                mono: true
+            }
+        );
     }
 
     #[test]
@@ -259,7 +406,7 @@ mod tests {
             sample_rate: 44_100,
             channels: 2,
         };
-        let mut writer = FinalWriter::create(Mode::Meeting, &path, format).unwrap();
+        let mut writer = FinalWriter::create(Mode::Meeting, Format::M4a, &path, format).unwrap();
         writer.write(&tone(44_100, 2, 0.5)).unwrap();
         assert_eq!(writer.finish().unwrap(), path);
 
@@ -283,7 +430,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 1,
         };
-        let mut writer = FinalWriter::create(Mode::Meeting, &path, format).unwrap();
+        let mut writer = FinalWriter::create(Mode::Meeting, Format::M4a, &path, format).unwrap();
         writer.write(&tone(4_800, 1, 0.5)).unwrap();
         // Make the destination unwritable: a directory with the output's name.
         std::fs::create_dir(&path).unwrap();
