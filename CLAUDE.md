@@ -18,11 +18,12 @@ plan: `docs/superpowers/specs/`, `docs/superpowers/plans/`.
 - `src/recorder.rs` — record session: rtrb ring buffer, writer thread, Enter/Ctrl+C, status line, WAV size cap.
 - `src/trim.rs` — pure silence detection (10 ms RMS windows, ≥50 ms events, fades).
 - `src/process.rs` — `trim_file`: two streaming passes (measure, then copy range).
-- `src/encode.rs` — `FinalWriter`: 24-bit WAV (music) or mono CAF → `afconvert` → AAC m4a (meeting).
+- `src/encode.rs` — `FinalWriter`: 24-bit WAV or float CAF → `afconvert` → AAC m4a, in any mode (meeting downmixes to mono); `convert_to_aac`/`aac_settings` shared with `convert`.
 - `src/audio/caf.rs` — hand-written CAF f32 reader/writer (data size -1 while recording).
 - `src/audio/io.rs` — `RawWriter`/`RawReader` over WAV (hound) and CAF, picked by extension.
-- `src/mode.rs` — `Mode` presets (music −60 dBFS / meeting −40 dBFS), raw/output extensions.
-- `src/cli.rs` — clap definitions, default paths (`~/Music/map-recorder`, `MAP_RECORDER_DIR`), reporting.
+- `src/mode.rs` — `Mode` presets (music −60 dBFS / meeting −40 dBFS), raw extensions; `Format` (m4a default / wav) and `resolve_format` (`--format` vs `-o` extension).
+- `src/convert.rs` — `convert` command: any file `afconvert` reads → `.m4a`, no trimming.
+- `src/cli.rs` — clap definitions (record, trim, convert, completions), `EXAMPLES` help block, default paths (`~/Music/map-recorder`, `MAP_RECORDER_DIR`), reporting.
 
 ## Rules
 
@@ -39,4 +40,5 @@ plan: `docs/superpowers/specs/`, `docs/superpowers/plans/`.
 - `Info.plist` is embedded via `build.rs` (`-sectcreate __TEXT __info_plist`) for every linked artifact; needed for the permission prompt.
 - Changing output device mid-recording: brief gap in captured audio, then it resumes (verified by the user).
 - No `timeout` command on macOS by default.
+- macOS has no MP3 encoder (`afconvert -f MPG3` fails with `'fmt?'`; it only decodes MP3). AAC at 256 kbps is rejected at low sample rates (e.g. 22.05 kHz), so m4a output is always encoded at 48 kHz.
 - `cargo::unused_dependencies` warnings appear for dev-only crates; harmless.

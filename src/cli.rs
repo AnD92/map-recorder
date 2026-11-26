@@ -15,9 +15,12 @@ use crate::recorder::{RecordOptions, RecordReport, StopReason, record};
 /// modes are discoverable without opening each command's help.
 const EXAMPLES: &str = "\
 Examples:
-  map-recorder record                  Record music (lossless WAV)
-  map-recorder record --mode meeting   Record a meeting (compact .m4a)
+  map-recorder record                  Record music (compact .m4a)
+  map-recorder record --format wav     Record music (lossless WAV)
+  map-recorder record --mode meeting   Record a meeting (mono .m4a)
   map-recorder trim take.raw.wav       Re-trim an existing recording
+  map-recorder convert *.wav           Convert existing files to .m4a
+  map-recorder completions zsh         Print the zsh completion script
   map-recorder record --help           All recording options";
 
 /// Record everything your Mac plays, then trim the silence around it.
@@ -326,6 +329,13 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("map-recorder record --help"), "{help}");
+        for example in [
+            "map-recorder record --format wav",
+            "map-recorder convert",
+            "map-recorder completions zsh",
+        ] {
+            assert!(help.contains(example), "{help}");
+        }
     }
 
     #[test]

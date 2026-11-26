@@ -14,11 +14,11 @@ the native Core Audio *process tap* API introduced in macOS 14.2.
 
 ```
 $ map-recorder record
-Recording system audio (48000 Hz, 2 ch, music mode) → ~/Music/map-recorder/recording-20261126-160905.wav
+Recording system audio (48000 Hz, 2 ch, music mode) → ~/Music/map-recorder/recording-20261126-160905.m4a
 ● REC 00:03:27  [##############------]  -18.4 dBFS   (press Enter to stop)
 Trimming silence…
 Recorded 237.6 s of audio.
-Saved /Users/you/Music/map-recorder/recording-20261126-160905.wav
+Saved /Users/you/Music/map-recorder/recording-20261126-160905.m4a
   kept 205.1 s, removed 2.0 s at the start and 30.5 s at the end
 ```
 
@@ -27,11 +27,14 @@ Saved /Users/you/Music/map-recorder/recording-20261126-160905.wav
 - 🎧 **System audio capture** without drivers, via Core Audio process taps.
 - ✂️ **Automatic trimming** of leading and trailing silence.
 - 🎼 **Two modes**:
-  - `music` — strict silence detection (quiet passages and fade-outs are preserved), lossless **24-bit WAV**;
-  - `meeting` — lenient silence detection (room noise counts as silence), compact **AAC `.m4a`**, mono, ready for transcription tools.
+  - `music` — strict silence detection (quiet passages and fade-outs are preserved), stereo **AAC `.m4a` at 256 kbps** (about 2 MB per minute), ready for your playlists;
+  - `meeting` — lenient silence detection (room noise counts as silence), compact mono **AAC `.m4a`**, ready for transcription tools.
+- 💾 **Lossless when you want it**: `--format wav` saves a 24-bit WAV instead.
 - 📈 Live elapsed time and level meter while recording.
 - 🛟 **Safe by design**: audio is streamed to disk and the file is kept valid every second, so even a crash or a closed terminal leaves a usable file; the untrimmed capture is kept whenever something goes wrong, and a file with the final name is always complete.
 - 🔁 `trim` command to re-process any `.wav` / `.caf` file with different settings.
+- 🔄 `convert` command to shrink recordings you already have into `.m4a`.
+- ⌨️ Tab completion for zsh (and other shells).
 
 ## Requirements
 
@@ -115,7 +118,16 @@ map-recorder record
 
 Start playback whenever you like, then press **Enter** (or **Ctrl+C**) to stop.
 Pressing **Ctrl+C** again while trimming exits immediately and keeps the untrimmed capture.
-The result is saved to `~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.wav`.
+The result is saved to `~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.m4a`:
+stereo AAC, 48 kHz, 256 kbps — about 2 MB per minute (a 4-minute song is about
+8 MB). It plays in Apple Music, on iPhone and Android phones, in VLC and in
+practically every music player.
+
+For a lossless master (about 17 MB per minute), ask for WAV:
+
+```sh
+map-recorder record --format wav
+```
 
 ### Record a meeting
 
@@ -128,9 +140,14 @@ Produces `~/Music/map-recorder/recording-YYYYMMDD-HHMMSS.m4a` (AAC, mono, 48 kHz
 ### Choose where to save
 
 ```sh
-map-recorder record -o ~/Desktop/live-session.wav
+map-recorder record -o ~/Desktop/live-session.m4a
+map-recorder record -o ~/Desktop/live-session.wav     # lossless
 map-recorder record --mode meeting -o standup.m4a
 ```
+
+The name given with `-o` must end in `.m4a` or `.wav`, and its extension picks
+the format. If you also pass `--format`, the two must agree. This is checked
+before recording starts.
 
 To change the default folder permanently, set `MAP_RECORDER_DIR`, e.g. in `~/.zshrc`:
 
@@ -146,29 +163,71 @@ map-recorder trim interview.wav --mode meeting -o interview.m4a
 ```
 
 `trim` accepts WAV (16/24/32-bit integer or 32-bit float) and CAF (32-bit float)
-files. By default it writes `<name>.trimmed.<wav|m4a>` next to the input.
+files. By default it writes `<name>.trimmed.m4a` next to the input
+(`<name>.trimmed.wav` with `--format wav`).
+
+### Convert existing files
+
+```sh
+map-recorder convert song.wav                  # → song.m4a
+map-recorder convert *.wav                     # every WAV in the folder
+map-recorder convert interview.wav --mode meeting
+map-recorder convert song.wav -o ~/Desktop/song.m4a
+```
+
+`convert` only changes the format — it does **not** trim silence (use `trim`
+for that). It accepts anything macOS can read (WAV, AIFF, CAF, FLAC, MP3, …),
+writes `<name>.m4a` next to each file, and never touches the original. With
+`--mode music` (default) the result is stereo AAC at 256 kbps; with
+`--mode meeting` it is mono AAC at 64 kbps. If one file fails, the others are
+still converted and the command exits with an error at the end. Existing
+`.m4a` files are never overwritten.
+
+### Tab completion
+
+To complete commands, options and file names with **Tab**, add this line to
+`~/.zshrc` (after `compinit`, if your config calls it) and open a new terminal:
+
+```sh
+source <(map-recorder completions zsh)
+```
+
+Then `map-recorder con<Tab>` becomes `map-recorder convert`, and
+`--format <Tab>` offers `m4a` and `wav`. Scripts for other shells are available
+too: `map-recorder completions bash|fish|elvish|powershell`.
 
 ## Options
 
 | Option | Commands | Default | Description |
 |---|---|---|---|
-| `--mode <music\|meeting>` | record, trim | `music` | Silence sensitivity and output format |
+| `--mode <music\|meeting>` | record, trim, convert | `music` | Silence sensitivity (record, trim), channels and quality |
+| `--format <m4a\|wav>` | record, trim | `m4a` (or the extension of `-o`) | Final file format |
 | `--threshold-db <dB>` | record, trim | `-60` (music), `-40` (meeting) | Loudness below which audio counts as silence |
 | `--max-lead <sec>` | record, trim | `2` | Maximum silence kept before the first sound |
 | `--tail-pad <sec>` | record, trim | `0.5` | Silence kept after the last sound |
-| `-o, --output <path>` | record, trim | see above | Output file |
+| `-o, --output <path>` | record, trim, convert | see above | Output file (`convert`: single input only) |
 | `--keep-raw` | record | off | Keep the untrimmed capture next to the result |
 
 Existing files are never overwritten: choose another name or delete the old file.
 
 ### Output formats
 
-| Mode | While recording (raw) | Final file |
-|---|---|---|
-| `music` | `<name>.raw.wav` — 32-bit float, original rate/channels | `<name>.wav` — 24-bit PCM, original rate/channels |
-| `meeting` | `<name>.raw.caf` — 32-bit float, original rate/channels | `<name>.m4a` — AAC, mono, 48 kHz, 64 kbps |
+| Mode | While recording (raw) | Final file, `--format m4a` (default) | Final file, `--format wav` |
+|---|---|---|---|
+| `music` | `<name>.raw.wav` — 32-bit float, original rate/channels | `<name>.m4a` — AAC, original channels, 48 kHz, 256 kbps | `<name>.wav` — 24-bit PCM, original rate/channels |
+| `meeting` | `<name>.raw.caf` — 32-bit float, original rate/channels | `<name>.m4a` — AAC, mono, 48 kHz, 64 kbps | `<name>.wav` — 24-bit PCM, mono, original rate |
 
 The raw file is deleted after a successful trim (unless `--keep-raw`).
+
+The recording always goes through an uncompressed raw file: trimming needs the
+exact samples, and an uncompressed file is still usable if the program is
+interrupted. AAC encoding happens once, at the end, with macOS's built-in
+`afconvert`.
+
+**Why AAC and not MP3?** macOS ships an AAC encoder but no MP3 encoder, so MP3
+would need extra software (`lame` or `ffmpeg`). At the same size AAC sounds as
+good as MP3 or better, and every modern phone, computer and music app plays
+`.m4a` files.
 
 ## How trimming works
 
@@ -251,8 +310,9 @@ Code layout:
 | `src/trim.rs` | Silence detection (pure logic) |
 | `src/process.rs` | Two-pass streaming trim of a file |
 | `src/encode.rs` | Final output (24-bit WAV / AAC via `afconvert`) |
+| `src/convert.rs` | `convert` command: existing files → `.m4a` |
 | `src/audio/` | WAV and CAF streaming readers/writers |
-| `src/mode.rs` | `music` / `meeting` presets |
+| `src/mode.rs` | `music` / `meeting` presets, `m4a` / `wav` formats |
 | `src/cli.rs` | Command-line interface |
 
 The capture layer can't be tested automatically (it needs real audio and a
