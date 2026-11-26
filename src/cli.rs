@@ -10,9 +10,18 @@ use crate::mode::{Mode, Settings};
 use crate::process::{TrimOutcome, trim_file};
 use crate::recorder::{RecordOptions, RecordReport, StopReason, record};
 
+/// Usage examples shown at the end of `map-recorder --help`, so the two
+/// modes are discoverable without opening each command's help.
+const EXAMPLES: &str = "\
+Examples:
+  map-recorder record                  Record music (lossless WAV)
+  map-recorder record --mode meeting   Record a meeting (compact .m4a)
+  map-recorder trim take.raw.wav       Re-trim an existing recording
+  map-recorder record --help           All recording options";
+
 /// Record everything your Mac plays, then trim the silence around it.
 #[derive(Parser)]
-#[command(name = "map-recorder", version, about)]
+#[command(name = "map-recorder", version, about, after_help = EXAMPLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -238,6 +247,17 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn top_level_help_shows_mode_examples() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_help().to_string();
+        assert!(
+            help.contains("map-recorder record --mode meeting"),
+            "{help}"
+        );
+        assert!(help.contains("map-recorder record --help"), "{help}");
+    }
 
     #[test]
     fn settings_override_mode_defaults() {
